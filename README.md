@@ -19,6 +19,13 @@
 - 系统对每个规格分别计算，再把各规格可行段统一到角度域 **0°–360°** 求圆周交集，输出**所有规格均安全的共用角度段**（跨零点自动合并展示）。
 - **默认共用角度**：对候选角度 θ 取其在各规格下到禁用边界的圆周角距离的最小值并最大化（即瓶颈间隙最大），平局时取较小角度；右栏列出该角度在每个规格下的实际间隙与对应毫米位置。
 - **无共同解**时，按规格输入顺序定位使公共交集**首次归零**的规格，列出该规格及其禁用区间与此前公共段的**冲突区间**，Canvas 上以红虚线标出。
+- **最小违约备选**：公共可行段为空时，系统额外给出一个“违约最小”的备选角度——
+  - 角度 θ 在某规格禁用区内的**侵入深度**取其到最近禁用边界（出口）的沿弧角距离，区外为 0；
+  - 以各规格禁用角度边界切分整圆，求使**所有规格中最大侵入深度最小**的角度；并列时依次比较**总侵入深度**、**较小角度**；
+  - **启用设备档位约束时只在档位角度中求解**（返回命中的档位序号）；
+  - 结果区琥珀色卡片列出**备选角度、最大侵入深度、总侵入深度、各规格侵入深度（及对应毫米位置）与无解原因**，点击卡片可将圆盘转到该角度；Canvas 以**琥珀色位置线与菱形标记**标出（启用档位时该档位刻度也为琥珀色长刻度），底部图例同步增加“最小违约备选”；
+  - 若禁用区仅在边界相接（公共可行段为零宽接触点），备选的最大侵入深度为 **0°**；
+  - **存在共同安全段时不产出备选**（`fallback=null`），结果与此前完全一致。
 - Canvas 由外向内**叠加每个规格的禁用环**（颜色对应规格序号），绿色环为共用安全段；拖动时吸附到最近的共用安全角度。
 - 切回「单规格模式」时，单规格的周长与多规格周长列表均保留在页面中，**不会丢失任何已输入内容**。
 - 方案快照仅保存单规格结果，多规格模式下快照入口自动禁用。
@@ -34,11 +41,56 @@
 - 差异 Canvas 上三个环分别对应可行段（外）、禁用段（中）、保护区（内），右栏列出逐段明细（角度，并附各快照周长下的毫米参考值）。
 - 快照数据保存在浏览器 **localStorage**（键 `seam-avoidance:snapshots:v1`，最多 100 个），不经过服务器；清除浏览器数据即删除。重新计算或「返回实时预览」即回到原有实时预览。
 
-## 启动
+## 启动（Docker，推荐）
+
+前置要求：Docker 20.10+（含 Docker Compose v2，命令为 `docker compose`）。
+
+### 使用 docker compose
 
 ```bash
+# 构建镜像并前台启动（依赖已在镜像构建阶段安装，启动即就绪）
 docker compose up --build
+
+# 后台运行
+docker compose up -d --build
+
+# 查看日志 / 停止
+docker compose logs -f
+docker compose down
 ```
+
+服务监听容器内 `3000` 端口，默认映射到宿主机 `http://localhost:3000`。
+
+改用其他宿主端口（例如 8080）时，在启动命令前设置 `PORT` 即可，
+`docker-compose.yml` 以 `${PORT:-3000}:3000` 读取该变量（容器内监听端口
+仍固定为 3000）：
+
+```bash
+PORT=8080 docker compose up -d --build
+# 随后访问 http://localhost:8080
+```
+
+也可以直接编辑 `docker-compose.yml` 的 `ports`（如 `"8080:3000"`）。
+如需连容器内监听端口一并修改，请改用下文的纯 Docker 方式。
+
+### 仅用 Docker（不使用 compose）
+
+```bash
+docker build -t seam-avoidance .
+docker run --rm -p 3000:3000 seam-avoidance
+
+# 自定义容器内监听端口（应用读取 PORT 环境变量）
+docker run --rm -e PORT=8080 -p 8080:8080 seam-avoidance
+```
+
+### 健康检查
+
+```bash
+curl http://localhost:3000/api/health   # -> {"ok":true}
+```
+
+镜像基于 `node:20-alpine`，仅包含生产依赖（`npm ci --omit=dev`），默认
+`NODE_ENV=production`。
 
 ## 配置
 
@@ -55,7 +107,7 @@ http://localhost:3000
 | 方法 & 路径 | 说明 |
 | ----------- | ---- |
 | `POST /api/compute` | 单规格计算。请求体：`{circumference, seamWidth, zones:[{start,end}], detents?}`（单位 mm） |
-| `POST /api/compute-multi` | 多规格共用角度。请求体：`{circumferences:[…2～8 个周长…], seamWidth, zones, detents?}`；返回每个规格的完整单规格结果（`specs[].result`）、圆周交集 `common`（角度弧段）、默认角度 `best.deg` 及各规格间隙 `best.gaps`；无共同解时 `noSolution=true` 并给出 `blocker`（首次归零的规格序号、此前公共段 `priorCommon`、该规格禁用段 `blockingForbidden` 与冲突区间 `conflictSegments`） |
+| `POST /api/compute-multi` | 多规格共用角度。请求体：`{circumferences:[…2～8 个周长…], seamWidth, zones:[{start,end}], detents?}`；返回每个规格的完整单规格结果（`specs[].result`）、圆周交集 `common`（角度弧段）、默认角度 `best.deg` 及各规格间隙 `best.gaps`；无共同解时 `noSolution=true` 并给出 `blocker`（首次归零的规格序号、此前公共段 `priorCommon`、该规格禁用段 `blockingForbidden` 与冲突区间 `conflictSegments`）与**最小违约备选 `fallback`**（见下）；有共同安全段时 `fallback=null` |
 | `GET /api/health` | 健康检查 |
 
 `detents`（可选）为设备档位约束：`{enabled:true, steps:2～360 的整数, offsetDeg?:数值角度}`；缺省或 `enabled:false` 时行为不变（返回 `detents:{enabled:false}`）。启用后返回：
@@ -64,6 +116,15 @@ http://localhost:3000
 - `detents.available`：全部可用档位。单规格每项 `{index, deg, mm, gapDeg}`；多规格每项 `{index, deg, minGapDeg, gaps:[各规格间隙]}`；
 - 单规格 `best` 取最优可用档位（附 `detentIndex`）；多规格 `best` 同理；
 - 连续区间有解但无可用档位时 `best=null`、`detents.noAvailable=true`，`detents.nearest[]` 按可行/共用弧给出 `{before, after}`（最近前、后档位及角距离）；保护区覆盖整圈时 `noSolution=true`、`noAvailable=false`。
+
+`fallback`（仅 `POST /api/compute-multi`，公共可行段为空时返回，否则为 `null`）为**最小违约备选**，字段：
+
+- `deg`：备选角度（°）；`maxIntrusionDeg`：所有规格中的最大侵入深度；`sumIntrusionDeg`：各规格侵入深度之和（第一个并列判据）；
+- `intrusions[]`：逐规格 `{index, circumference, intrusionDeg, mm}`，`intrusionDeg` 为该角度在该规格禁用区内到最近禁用边界的沿弧深度（区外为 0），`mm` 为该角度对应的接缝毫米位置；
+- `restrictedToDetents`：是否只在设备档位角度中求解；`detentIndex`：命中的档位序号（连续求解时为 `null`）；
+- `reason`：无解原因文案（各规格禁用区并集覆盖整圆，无对所有规格同时安全的角度）。
+
+前端交互：无共同解时结果区显示琥珀色备选卡片（含备选角度、最大/总/各规格侵入深度、无解原因），点击卡片将共用角度转到备选角；Canvas 以琥珀色位置线与菱形标记该角度（图例标注“最小违约备选”）；启用档位时该档刻度为琥珀色长刻度。有共同安全段时界面与此前完全一致。
 
 ## 本地开发（可选）
 

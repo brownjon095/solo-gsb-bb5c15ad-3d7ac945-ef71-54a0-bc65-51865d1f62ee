@@ -255,7 +255,12 @@ async function computeMulti() {
 
   state.multiResult = result;
   state.lastInput = null; // 多规格结果不进入单规格快照
-  if (result.best) state.thetaDeg = result.best.deg;
+  if (result.best) {
+    state.thetaDeg = result.best.deg;
+  } else if (result.fallback) {
+    // 公共可行段为空：默认定位到“最小违约备选”角度
+    state.thetaDeg = result.fallback.deg;
+  }
   exitDiffMode();
   renderMultiResults();
   draw();
@@ -519,6 +524,8 @@ function renderMultiResults() {
     warnBox.innerHTML = '';
   }
 
+  renderMultiFallback();
+
   if (r.noSolution && r.blocker) {
     const b = r.blocker;
     const conflicts = b.conflictSegments.length
@@ -587,6 +594,47 @@ function renderMultiResults() {
   });
 
   renderMultiLegend();
+}
+
+/** 无共同解时渲染“最小违约备选”框；有共同安全段时隐藏，结果区其余内容不变。 */
+function renderMultiFallback() {
+  const r = state.multiResult;
+  const box = $('multiFallbackBox');
+  if (!r || !r.noSolution || !r.fallback) {
+    box.hidden = true;
+    box.innerHTML = '';
+    box.onclick = null;
+    return;
+  }
+  const f = r.fallback;
+  const detentTag = f.restrictedToDetents && f.detentIndex !== null
+    ? ` ｜ 第 ${f.detentIndex + 1}/${r.detents.steps} 档`
+    : '';
+  const head =
+    f.maxIntrusionDeg <= 1e-9
+      ? '最小违约备选（公共段仅余边界接触点，侵入深度 0°）：'
+      : '最小违约备选（所有规格中最大侵入禁用区深度最小）：';
+  const per = f.intrusions
+    .map((g) => {
+      const mm = `${fmtMm(g.mm)} mm`;
+      return g.intrusionDeg <= 1e-9
+        ? `规格 ${g.index + 1}：未侵入（接缝落在 ${mm}）`
+        : `规格 ${g.index + 1}：侵入 ${fmtDeg(g.intrusionDeg)}°（接缝落在 ${mm}）`;
+    })
+    .join('<br>');
+  box.innerHTML =
+    `${head}<br>` +
+    `<span class="num">${fmtDeg(f.deg)}°</span>${detentTag}` +
+    ` ｜ 最大侵入 ${fmtDeg(f.maxIntrusionDeg)}° ｜ 总侵入 ${fmtDeg(f.sumIntrusionDeg)}°` +
+    `<div class="chain-item">无解原因：${f.reason}</div>` +
+    `<div class="chain-item">${per}</div>`;
+  box.title = '点击将共用角度移到该备选角度';
+  box.onclick = () => {
+    state.thetaDeg = f.deg;
+    renderMultiResults();
+    draw();
+  };
+  box.hidden = false;
 }
 
 function markActiveCommon() {
@@ -668,7 +716,10 @@ function renderMultiLegend() {
     `<div class="lg-row">${items}</div>` +
     `<div class="lg-row"><span class="lg-item"><span class="lg-swatch common"></span>所有规格共用安全段</span>` +
     (r.noSolution
-      ? `<span class="lg-item"><span class="lg-swatch conflict"></span>冲突区间（首次归零）</span>`
+      ? `<span class="lg-item"><span class="lg-swatch conflict"></span>冲突区间（首次归零）</span>` +
+        (r.fallback
+          ? `<span class="lg-item"><span class="lg-swatch fallback"></span>最小违约备选（琥珀色）</span>`
+          : '')
       : '') +
     `</div>`;
 }
@@ -1138,6 +1189,35 @@ function drawMulti() {
     drawNearestDetentMarkers(ctx, cx, cy, r.detents, outR + 12);
   }
 
+  // 无共同解时的“最小违约备选”角度：琥珀色位置线 + 菱形标记
+  if (r.noSolution && r.fallback) {
+    const af = multiRadDeg(r.fallback.deg);
+    // 启用档位时在备选档位补一条琥珀色长刻度
+    if (r.fallback.restrictedToDetents) {
+      ctx.strokeStyle = '#d97706';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(cx + (outR + 24) * Math.cos(af), cy + (outR + 24) * Math.sin(af));
+      ctx.lineTo(cx + (outR + 32) * Math.cos(af), cy + (outR + 32) * Math.sin(af));
+      ctx.stroke();
+    }
+    ctx.strokeStyle = '#d97706';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx + (commonR - 10) * Math.cos(af), cy + (commonR - 10) * Math.sin(af));
+    ctx.lineTo(cx + (R + 26) * Math.cos(af), cy + (R + 26) * Math.sin(af));
+    ctx.stroke();
+    const fx = cx + (commonR + 12) * Math.cos(af);
+    const fy = cy + (commonR + 12) * Math.sin(af);
+    ctx.fillStyle = '#d97706';
+    ctx.beginPath();
+    ctx.moveTo(fx, fy);
+    ctx.lineTo(fx - 6 * Math.cos(af - 0.35), fy - 6 * Math.sin(af - 0.35));
+    ctx.lineTo(fx - 6 * Math.cos(af + 0.35), fy - 6 * Math.sin(af + 0.35));
+    ctx.closePath();
+    ctx.fill();
+  }
+
   // 当前共用角度位置线
   if (!r.noSolution) {
     const theta = state.thetaDeg;
@@ -1192,9 +1272,20 @@ function drawMulti() {
   ctx.textBaseline = 'middle';
   if (r.noSolution) {
     ctx.fillStyle = '#d43a3a';
-    ctx.fillText('无共同解', cx, cy - 12);
-    ctx.font = '13px sans-serif';
-    ctx.fillText(`规格 ${r.blocker ? r.blocker.index + 1 : ''} 使交集归零`, cx, cy + 14);
+    ctx.fillText('无共同解', cx, cy - 22);
+    ctx.font = '12px sans-serif';
+    ctx.fillStyle = '#d97706';
+    if (r.fallback) {
+      ctx.fillText(
+        `最小违约备选 ${fmtDeg(r.fallback.deg)}°`,
+        cx,
+        cy
+      );
+      ctx.fillStyle = '#9ca3af';
+      ctx.fillText(`最大侵入 ${fmtDeg(r.fallback.maxIntrusionDeg)}°`, cx, cy + 18);
+    }
+    ctx.fillStyle = '#9ca3af';
+    ctx.fillText(`规格 ${r.blocker ? r.blocker.index + 1 : ''} 使交集归零`, cx, cy + 36);
   } else {
     ctx.fillText(`${fmtDeg(state.thetaDeg)}°`, cx, cy - 10);
     ctx.font = n > 4 ? '11px sans-serif' : '13px sans-serif';
@@ -1218,7 +1309,9 @@ function drawMulti() {
 
   const detentsOn = !!(r.detents && r.detents.enabled);
   $('currentPos').textContent = r.noSolution
-    ? '当前无所有规格均安全的共用角度'
+    ? r.fallback
+      ? `当前无所有规格均安全的共用角度；琥珀色为最小违约备选 ${fmtDeg(r.fallback.deg)}°（最大侵入 ${fmtDeg(r.fallback.maxIntrusionDeg)}°）`
+      : '当前无所有规格均安全的共用角度'
     : detentsOn && r.detents.noAvailable
       ? '共用段连续有解，但无可用档位：灰色为全部档位，琥珀色为距共用段最近的档位'
       : detentsOn

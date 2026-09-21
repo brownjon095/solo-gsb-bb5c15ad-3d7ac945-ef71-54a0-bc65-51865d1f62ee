@@ -127,6 +127,25 @@ button.small { padding: 3px 10px; font-size: 12px; }
   padding: 10px 12px;
   font-size: 14px;
 }
+
+.fallback {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.fallback:hover { background: #fef3c7; }
+.fallback .num { font-size: 20px; font-weight: 700; color: #b45309; }
+.fallback .chain-item {
+  padding: 3px 0;
+  margin-top: 3px;
+  border-top: 1px dashed #fcd34d;
+  font-size: 12.5px;
+}
+#multiFallbackBox { margin-bottom: 8px; }
 #chainList { margin-top: 8px; font-size: 13px; }
 #chainList .chain-item { padding: 3px 0; border-top: 1px dashed #fecaca; }
 
@@ -316,6 +335,7 @@ button.small { padding: 3px 10px; font-size: 12px; }
   background: repeating-linear-gradient(45deg, #d43a3a 0 4px, #fff 4px 8px);
   border: 1px solid #d43a3a;
 }
+.multi-legend .lg-swatch.fallback { background: #d97706; }
 
 /* ---------------- 方案快照 ---------------- */
 

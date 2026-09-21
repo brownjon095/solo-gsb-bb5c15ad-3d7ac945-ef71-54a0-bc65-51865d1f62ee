@@ -142,3 +142,59 @@ test('多规格：连续公共段有解但无可用档位时 noAvailable=true �
   assert.equal(r.json.detents.noAvailable, true);
   assert.equal(r.json.detents.nearest.length, 1);
 });
+
+test('多规格：无共同解时返回最小违约备选 fallback；有共同解时为 null', async () => {
+  const noCommon = await postJson('/api/compute-multi', {
+    circumferences: [360, 180],
+    seamWidth: 0,
+    zones: [
+      { start: 90, end: 180 },
+      { start: 180, end: 360 },
+    ],
+  });
+  assert.equal(noCommon.status, 200);
+  assert.equal(noCommon.json.noSolution, true);
+  assert.equal(noCommon.json.best, null);
+  assert.ok(noCommon.json.fallback);
+  const f = noCommon.json.fallback;
+  assert.equal(f.deg, 0);
+  assert.equal(f.maxIntrusionDeg, 0);
+  assert.equal(typeof f.sumIntrusionDeg, 'number');
+  assert.equal(f.restrictedToDetents, false);
+  assert.equal(f.detentIndex, null);
+  assert.equal(Array.isArray(f.intrusions), true);
+  assert.equal(f.intrusions.length, 2);
+  for (const item of f.intrusions) {
+    assert.equal(typeof item.index, 'number');
+    assert.equal(typeof item.circumference, 'number');
+    assert.equal(typeof item.intrusionDeg, 'number');
+    assert.equal(typeof item.mm, 'number');
+  }
+  assert.match(f.reason, /公共可行角度为空/);
+  assert.ok(noCommon.json.blocker);
+
+  const ok = await postJson('/api/compute-multi', baseMulti);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.noSolution, false);
+  assert.equal(ok.json.fallback, null);
+});
+
+test('多规格：启用档位且无共同解时 fallback 只取档位角度并带 detentIndex', async () => {
+  const r = await postJson('/api/compute-multi', {
+    circumferences: [134, 592],
+    seamWidth: 39,
+    zones: [
+      { start: 171, end: 308 },
+      { start: 263, end: 457 },
+    ],
+    detents: { enabled: true, steps: 4 },
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.noSolution, true);
+  assert.equal(r.json.fallback.restrictedToDetents, true);
+  assert.equal(r.json.fallback.deg, 270);
+  assert.equal(r.json.fallback.detentIndex, 3);
+  // 备选角度必须是档位之一
+  assert.ok(r.json.detents.positions.includes(r.json.fallback.deg));
+  assert.ok(Math.abs(r.json.fallback.maxIntrusionDeg - 28.208955223880565) < 1e-9);
+});

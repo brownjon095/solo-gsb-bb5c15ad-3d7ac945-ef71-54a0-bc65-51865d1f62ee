@@ -15,10 +15,16 @@
  *
  * 无共同解时，按输入顺序逐个累计交集，报告使交集首次归零的规格，
  * 并给出此前公共可行段与该规格禁用段的冲突区间。
+ *
+ * 公共可行段为空（无共同解）时，额外计算“最小违约备选”：
+ * 侵入深度 d_k(θ) 为 θ 在规格 k 禁用区内到最近禁用边界（出口）的沿弧
+ * 距离，区外为 0；按各规格禁用边界切分整圆，求使 max_k d_k(θ) 最小
+ * 的角度，并列时依次比较总侵入深度 Σ_k d_k(θ)、较小角度。启用设备
+ * 档位约束时只在档位角度中求解。有共同安全段时不产出备选（null）。
  */
 
 const { computeSeamAvoidance } = require('./seamMath');
-const { parseDetents, analyzeDetents } = require('./detents');
+const { parseDetents, analyzeDetents, detentPositions } = require('./detents');
 
 const FULL = 360;
 const EPS = 1e-7; // 角度比较容差
@@ -198,6 +204,230 @@ function gapForSpec(deg, result) {
   return pts.reduce((best, p) => Math.min(best, circDistDeg(deg, p)), Infinity);
 }
 
+/* ---------------- 最小违约备选 ---------------- */
+
+/**
+ * 某规格的禁用区圆周弧（由线性禁用片段还原，跨零合并）。
+ * 无解（整圈禁用）返回一条 {full:true} 弧。
+ */
+function forbiddenArcsForSpec(result) {
+  const pieces = forbiddenDegPieces(result);
+  const conv = toCircularArcs(pieces);
+  return conv.arcs;
+}
+
+/**
+ * 角度 θ 在某规格禁用区内的侵入深度（角度）：区内为到最近禁用边界（出口）
+ * 的沿弧距离，区外为 0；整圈禁用时为圆上到该规格边界的最短距离
+ * （对径点达 180°）。
+ */
+function intrusionForSpec(deg, arcs) {
+  let best = 0;
+  for (const a of arcs) {
+    if (a.full) {
+      best = Math.max(best, a.startDeg === undefined ? 0 : circDistDeg(deg, a.startDeg));
+      continue;
+    }
+    const inside = a.wraps
+      ? deg >= a.startDeg - EPS || deg <= a.endDeg + EPS
+      : deg >= a.startDeg - EPS && deg <= a.endDeg + EPS;
+    if (!inside) continue;
+    if (a.wraps) {
+      // 跨零弧 [s,360]∪[0,e]：θ≥s 时 e 提升到 360+e；θ≤e 时 s 降到 s-360
+      const d =
+        deg >= a.startDeg - EPS
+          ? Math.min(deg - a.startDeg, a.endDeg + FULL - deg)
+          : Math.min(deg + FULL - a.startDeg, a.endDeg - deg);
+      if (d > best) best = d;
+    } else {
+      const d = Math.min(deg - a.startDeg, a.endDeg - deg);
+      if (d > best) best = d;
+    }
+  }
+  return Math.max(0, best);
+}
+
+/** 圆周弧集 → 边界点（模 360 去重，升序）。整圈弧取其锚点 0。 */
+function arcBoundaryPoints(arcs) {
+  const pts = [];
+  for (const a of arcs) {
+    if (a.full) {
+      if (!pts.some((x) => x <= EPS)) pts.push(0);
+      continue;
+    }
+    for (const p of [a.startDeg, a.endDeg]) {
+      const q = mod(p, FULL);
+      if (!pts.some((x) => Math.abs(x - q) <= EPS)) pts.push(q);
+    }
+  }
+  return pts.sort((x, y) => x - y);
+}
+
+/**
+ * 计算全部规格在 deg 处的侵入明细。
+ * @returns {Array<{index:number,circumference:number,intrusionDeg:number,mm:number}>}
+ */
+function intrusionDetailsAt(specs, specArcs, deg) {
+  return specs.map((s) => ({
+    index: s.index,
+    circumference: s.circumference,
+    intrusionDeg: intrusionForSpec(deg, specArcs[s.index]),
+    mm: (deg / FULL) * s.circumference,
+  }));
+}
+
+/** 候选打分：(最大侵入, 总侵入, 角度) 字典序越小越优。 */
+function betterFallbackPoint(curr, cand) {
+  if (cand.maxIntrusionDeg < curr.maxIntrusionDeg - EPS) return true;
+  if (cand.maxIntrusionDeg > curr.maxIntrusionDeg + EPS) return false;
+  if (cand.sumIntrusionDeg < curr.sumIntrusionDeg - EPS) return true;
+  if (cand.sumIntrusionDeg > curr.sumIntrusionDeg + EPS) return false;
+  return cand.deg < curr.deg - EPS;
+}
+
+function scoreFallbackPoint(specs, specArcs, deg) {
+  const details = intrusionDetailsAt(specs, specArcs, deg);
+  const sum = details.reduce((acc, d) => acc + d.intrusionDeg, 0);
+  const max = details.reduce((m, d) => Math.max(m, d.intrusionDeg), 0);
+  return { deg, maxIntrusionDeg: max, sumIntrusionDeg: sum, intrusions: details };
+}
+
+/**
+ * 连续角度域的最小违约备选。
+ *
+ * 以各规格禁用边界切分整圆，并把每段禁用弧的中点（各规格“距边界最远”
+ * 的折线折点）一并作为切分点；每个原子区间内，各规格侵入深度均为斜率
+ * ±1（或 0）的线性函数，故 f(θ)=max_k d_k(θ) 的最小值只可能落在切分点
+ * 或“上升包络与下降包络的交点”。逐格枚举这些候选后按
+ * （最大侵入、总侵入、角度）字典序取最优。
+ * @param {Array} specs computeMultiSpec 内部规格数组
+ * @param {Array} specArcs 各规格禁用圆周弧（与 specs 对齐）
+ */
+function computeContinuousFallback(specs, specArcs) {
+  const active = specs.filter((s) => specArcs[s.index].length > 0);
+  if (active.length === 0) return null; // 所有规格均无禁用区（理论上不会走到）
+
+  const cutsRaw = [0, FULL];
+  const specPts = new Map();
+  for (const s of active) {
+    const pts = arcBoundaryPoints(specArcs[s.index]);
+    specPts.set(s.index, pts);
+    for (const p of pts) cutsRaw.push(p);
+    // 提升整圈：…,b0-360,b1-360,b0,b1,b0+360,b1+360,…（边界数为 1 时自然退化为整圈）
+    let lifts;
+    if (pts.length === 1) {
+      lifts = [pts[0] - FULL, pts[0], pts[0] + FULL];
+    } else {
+      lifts = [];
+      for (const p of pts) lifts.push(p - FULL, p, p + FULL);
+      lifts.sort((a, b) => a - b);
+    }
+    for (let i = 0; i < lifts.length - 1; i++) {
+      const mid = (lifts[i] + lifts[i + 1]) / 2;
+      if (mid > EPS && mid < FULL - EPS) cutsRaw.push(mod(mid, FULL));
+    }
+  }
+
+  const cuts = [];
+  for (const x of cutsRaw.sort((a, b) => a - b)) {
+    if (!cuts.some((y) => Math.abs(y - x) <= EPS)) cuts.push(x);
+  }
+
+  const nearestLift = (deg, pts) => {
+    let best = null;
+    for (const p0 of pts) {
+      for (const L of [p0 - FULL, p0, p0 + FULL]) {
+        const d = Math.abs(deg - L);
+        if (best === null || d < best.d - EPS) best = { L, d };
+      }
+    }
+    return best.L;
+  };
+
+  const candidates = [];
+  const seenDeg = (d) => candidates.some((x) => Math.abs(x - d) <= EPS);
+
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const x0 = cuts[i];
+    const x1 = cuts[i + 1];
+    if (x1 - x0 <= EPS) continue;
+    const mid = (x0 + x1) / 2;
+
+    const fallingL = []; // 最近边界在右侧：d_k(θ) = L - θ，斜率 -1
+    const risingL = []; // 最近边界在左侧：d_k(θ) = θ - L，斜率 +1
+    for (const s of active) {
+      const arcs = specArcs[s.index];
+      const depth = intrusionForSpec(mid, arcs);
+      if (depth <= EPS) continue; // 该格中该规格不违约
+      const L = nearestLift(mid, specPts.get(s.index));
+      if (L > mid + EPS) fallingL.push(L);
+      else if (L < mid - EPS) risingL.push(L);
+    }
+    // 无违约规格意味着存在公共安全段（调用方保证不会出现）
+    if (fallingL.length === 0 && risingL.length === 0) continue;
+
+    // 上升包络 θ - min(L升) 与下降包络 max(L降) - θ 的交点
+    if (fallingL.length > 0 && risingL.length > 0) {
+      const lMin = Math.min(...risingL);
+      const rMax = Math.max(...fallingL);
+      const cross = (lMin + rMax) / 2;
+      if (cross > x0 + EPS && cross < x1 - EPS) candidates.push(mod(cross, FULL));
+    }
+  }
+  for (const c of cuts) {
+    const d = mod(c, FULL);
+    if (!seenDeg(d)) candidates.push(d);
+  }
+
+  let winner = null;
+  for (const deg of candidates) {
+    const score = scoreFallbackPoint(specs, specArcs, mod(deg, FULL));
+    if (!winner || betterFallbackPoint(winner, score)) winner = score;
+  }
+  return winner;
+}
+
+/**
+ * 设备档位角度域的最小违约备选：只在档位角度中按
+ * （最大侵入、总侵入、角度）字典序选最优。
+ * @returns {object|null} 附 detentIndex 的备选
+ */
+function computeDetentFallback(specs, specArcs, detentCfg) {
+  const positions = detentPositions(detentCfg);
+  let winner = null;
+  positions.forEach((deg, index) => {
+    const score = scoreFallbackPoint(specs, specArcs, deg);
+    score.detentIndex = index;
+    if (!winner || betterFallbackPoint(winner, score)) winner = score;
+  });
+  return winner;
+}
+
+/**
+ * 构造最小违约备选返回结构。
+ * @param {Array} specs
+ * @param {Array} specArcs
+ * @param {object|null} detentCfg 启用时的档位配置
+ * @returns {{deg:number,maxIntrusionDeg:number,sumIntrusionDeg:number,intrusions:Array,
+ *            restrictedToDetents:boolean,detentIndex:number|null,reason:string}|null}
+ */
+function buildFallback(specs, specArcs, detentCfg) {
+  const win = detentCfg && detentCfg.enabled
+    ? computeDetentFallback(specs, specArcs, detentCfg)
+    : computeContinuousFallback(specs, specArcs);
+  if (!win) return null;
+  return {
+    deg: win.deg,
+    maxIntrusionDeg: win.maxIntrusionDeg,
+    sumIntrusionDeg: win.sumIntrusionDeg,
+    intrusions: win.intrusions,
+    restrictedToDetents: !!(detentCfg && detentCfg.enabled),
+    detentIndex: win.detentIndex === undefined ? null : win.detentIndex,
+    reason:
+      '公共可行角度为空：各规格禁用区的并集覆盖整圆（无对所有规格同时安全的角度）',
+  };
+}
+
 /**
  * 构造首次归零说明。
  * @param {object} spec 当前规格 {index, circumference, result}
@@ -260,6 +490,13 @@ function computeMultiSpec(circumferences, seamWidth, zones, detentsOpt) {
 
   const common = blocker ? [] : toCircularArcs(acc).arcs;
   const fullCircle = !blocker && isFullCircle(acc);
+
+  // 公共可行段为空时计算“最小违约备选”（启用档位时只在档位角度中求解）
+  let fallback = null;
+  if (blocker) {
+    const specArcs = specs.map((s) => forbiddenArcsForSpec(s.result));
+    fallback = buildFallback(specs, specArcs, detentCfg);
+  }
 
   let best = null;
   let detents = detentCfg.enabled
@@ -389,6 +626,7 @@ function computeMultiSpec(circumferences, seamWidth, zones, detentsOpt) {
     common,
     fullCircle,
     best,
+    fallback,
     noSolution: blocker !== null,
     blocker,
     detents,
@@ -406,5 +644,11 @@ module.exports = {
   toCircularArcs,
   circDistDeg,
   gapForSpec,
+  forbiddenArcsForSpec,
+  intrusionForSpec,
+  arcBoundaryPoints,
+  computeContinuousFallback,
+  computeDetentFallback,
+  buildFallback,
   computeMultiSpec,
 };
