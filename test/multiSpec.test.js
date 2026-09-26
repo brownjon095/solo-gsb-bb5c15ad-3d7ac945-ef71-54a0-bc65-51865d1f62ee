@@ -10,6 +10,8 @@ const {
   toCircularArcs,
   circDistDeg,
   gapForSpec,
+  intrusionForSpec,
+  computeMinViolationFallback,
   computeMultiSpec,
   MIN_SPECS,
   MAX_SPECS,
@@ -233,4 +235,143 @@ test('computeMultiSpec: 8 个规格可正常求交，接缝加宽会缩小公共
   const thinWidth = Math.max(...thin.common.map((a) => a.widthDeg));
   const wideWidth = Math.max(...wide.common.map((a) => a.widthDeg));
   assert.ok(wideWidth < thinWidth);
+});
+
+/* ---------------- 最小违约备选 ---------------- */
+
+test('intrusionForSpec: 落在禁用弧内/外、跨零弧与整圈的侵入深度', () => {
+  const normal = [{ startDeg: 36, endDeg: 108, wraps: false, widthDeg: 72 }];
+  approx(intrusionForSpec(72, normal), 36); // 弧中点
+  approx(intrusionForSpec(36, normal), 0); // 出口边界
+  approx(intrusionForSpec(200, normal), 0); // 弧外
+  // 跨零弧 350°→10°：零点在弧内部，出口在 350°/10°
+  const wrap = [{ startDeg: 350, endDeg: 10, wraps: true, widthDeg: 20 }];
+  approx(intrusionForSpec(0, wrap), 10);
+  approx(intrusionForSpec(355, wrap), 5);
+  approx(intrusionForSpec(5, wrap), 5);
+  approx(intrusionForSpec(180, wrap), 0);
+  approx(intrusionForSpec(10, wrap), 0);
+  // 整圈禁用
+  const full = [{ full: true, widthDeg: 360 }];
+  approx(intrusionForSpec(123, full), 180);
+});
+
+test('computeMinViolationFallback: 最大侵入最小，内部交点优于边界', () => {
+  // 规格 0 禁用 [8,205]，规格 1 禁用跨零 [200,360]∪[0,10]
+  // 公共交集为空；重叠区 [200,205] 与 [8,10]
+  // 交点 202.5° 处 max=2.5；9° 处 max=1 → 全局最优 9°
+  const specs = [0, 1].map((i) => ({ index: i, circumference: 360, result: {} }));
+  const sets = [
+    [[8, 205]],
+    [
+      [200, 360],
+      [0, 10],
+    ],
+  ];
+  const fb = computeMinViolationFallback(specs, sets, { enabled: false }, {
+    index: 1,
+    blockingForbidden: [],
+  });
+  approx(fb.deg, 9);
+  approx(fb.maxIntrusionDeg, 1);
+  approx(fb.totalIntrusionDeg, 2);
+  assert.deepEqual(
+    fb.intrusions.map((x) => x.intrusionDeg),
+    [1, 1]
+  );
+});
+
+test('computeMinViolationFallback: 最大侵入并列时比总侵入，再并列取较小角度', () => {
+  // 三段宽 140 的禁用弧依次重叠 20°（10–150 / 130–270 / 250→30 跨零）
+  // 三处交点 20°/140°/260° 最大侵入均为 10°；总侵入均为 20° → 取 20°
+  const specs = [0, 1, 2].map((i) => ({ index: i, circumference: 360, result: {} }));
+  const sets = [
+    [[10, 150]],
+    [[130, 270]],
+    [
+      [250, 360],
+      [0, 30],
+    ],
+  ];
+  const fb = computeMinViolationFallback(specs, sets, { enabled: false }, {
+    index: 2,
+    blockingForbidden: [],
+  });
+  approx(fb.deg, 20);
+  approx(fb.maxIntrusionDeg, 10);
+  approx(fb.totalIntrusionDeg, 20);
+});
+
+test('computeMinViolationFallback: 启用档位时只在档位角度中求解', () => {
+  const specs = [0, 1].map((i) => ({ index: i, circumference: 360, result: {} }));
+  const sets = [
+    [[8, 205]],
+    [
+      [200, 360],
+      [0, 10],
+    ],
+  ];
+  // 10° 网格：10° 档处侵入 [2,0]（连续最优 9° 不可选）
+  const fb = computeMinViolationFallback(specs, sets, {
+    enabled: true,
+    steps: 36,
+    offsetDeg: 0,
+  }, { index: 1, blockingForbidden: [] });
+  approx(fb.deg, 10);
+  assert.equal(fb.detentIndex, 1);
+  approx(fb.maxIntrusionDeg, 2);
+  // 偏移使某档恰好落在 9°
+  const fb2 = computeMinViolationFallback(specs, sets, {
+    enabled: true,
+    steps: 40,
+    offsetDeg: 9,
+  }, { index: 1, blockingForbidden: [] });
+  approx(fb2.deg, 9);
+  approx(fb2.maxIntrusionDeg, 1);
+});
+
+test('computeMultiSpec: 无共同解时返回 fallback；有共同解时 fallback=null', () => {
+  const r = computeMultiSpec(
+    [360, 180],
+    0,
+    [
+      { start: 90, end: 180 },
+      { start: 180, end: 360 },
+    ]
+  );
+  assert.equal(r.noSolution, true);
+  assert.ok(r.fallback);
+  assert.equal(typeof r.fallback.deg, 'number');
+  assert.equal(r.fallback.intrusions.length, 2);
+  // 规格 2 整圈禁用 → 该规格侵入恒为 180°
+  approx(r.fallback.intrusions[1].intrusionDeg, 180);
+  assert.match(r.fallback.reason, /覆盖整圈/);
+  // 各规格侵入明细带规格序号、周长与接缝毫米位置
+  for (const x of r.fallback.intrusions) {
+    assert.equal(typeof x.mm, 'number');
+    assert.equal(typeof x.circumference, 'number');
+  }
+
+  const ok = computeMultiSpec([400, 200], 20, [{ start: 60, end: 120 }]);
+  assert.equal(ok.noSolution, false);
+  assert.equal(ok.fallback, null);
+});
+
+test('computeMultiSpec + 档位：无共同解时 fallback 仅取档位角度并带 detentIndex', () => {
+  const r = computeMultiSpec(
+    [360, 180],
+    0,
+    [
+      { start: 90, end: 180 },
+      { start: 180, end: 360 },
+    ],
+    { enabled: true, steps: 12, offsetDeg: 0 }
+  );
+  assert.equal(r.noSolution, true);
+  assert.ok(r.fallback);
+  assert.ok(Number.isInteger(r.fallback.detentIndex));
+  // 备选角度必须是档位之一
+  const k = r.fallback.detentIndex;
+  approx(r.fallback.deg, (k * 360) / 12);
+  assert.match(r.fallback.reason, /档位/);
 });

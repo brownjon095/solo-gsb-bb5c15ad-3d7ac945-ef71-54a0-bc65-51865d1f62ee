@@ -19,6 +19,7 @@
 - 系统对每个规格分别计算，再把各规格可行段统一到角度域 **0°–360°** 求圆周交集，输出**所有规格均安全的共用角度段**（跨零点自动合并展示）。
 - **默认共用角度**：对候选角度 θ 取其在各规格下到禁用边界的圆周角距离的最小值并最大化（即瓶颈间隙最大），平局时取较小角度；右栏列出该角度在每个规格下的实际间隙与对应毫米位置。
 - **无共同解**时，按规格输入顺序定位使公共交集**首次归零**的规格，列出该规格及其禁用区间与此前公共段的**冲突区间**，Canvas 上以红虚线标出。
+- **最小违约备选**：公共可行段为空时（无共同解），系统进一步给出一个"违约最小"的备选角度——按各规格禁用角度边界切分整圆，角度落在某规格禁用区内时记其**侵入深度**（沿圆周走出该禁用区所需的最小角距离），选取使**所有规格中最大侵入深度最小**的角度；并列时依次比较**总侵入深度**与**较小角度**。结果区显示备选角度、最大/总侵入深度与各规格侵入深度及无解原因，Canvas 以**琥珀色位置线与菱形**标记该角度（仅作参考，不能变为安全角度）。**启用设备档位约束时只在档位角度中求解**，对应档位刻度同样以琥珀色标出。存在共同安全段时不进行该计算，结果与此前完全一致。
 - Canvas 由外向内**叠加每个规格的禁用环**（颜色对应规格序号），绿色环为共用安全段；拖动时吸附到最近的共用安全角度。
 - 切回「单规格模式」时，单规格的周长与多规格周长列表均保留在页面中，**不会丢失任何已输入内容**。
 - 方案快照仅保存单规格结果，多规格模式下快照入口自动禁用。
@@ -34,17 +35,29 @@
 - 差异 Canvas 上三个环分别对应可行段（外）、禁用段（中）、保护区（内），右栏列出逐段明细（角度，并附各快照周长下的毫米参考值）。
 - 快照数据保存在浏览器 **localStorage**（键 `seam-avoidance:snapshots:v1`，最多 100 个），不经过服务器；清除浏览器数据即删除。重新计算或「返回实时预览」即回到原有实时预览。
 
-## 启动
+## 启动（Docker）
+
+前置条件：已安装 Docker 与 Docker Compose（Docker Desktop 自带 `docker compose` 插件）。
 
 ```bash
+# 在项目根目录（含 docker-compose.yml）构建镜像并前台启动
 docker compose up --build
+
+# 后台运行
+docker compose up --build -d
+
+# 查看日志 / 停止
+docker compose logs -f
+docker compose down
 ```
+
+首次启动会执行 `npm ci --omit=dev` 安装依赖并纳入镜像；修改 `server.js`、`src/` 或 `public/` 后需重新 `docker compose up --build`。镜像基于 `node:20-alpine`，容器内以 `node server.js` 运行，不包含开发依赖与单元测试（测试见下方本地开发）。
 
 ## 配置
 
 | 环境变量 | 默认值 | 说明 |
 | -------- | ------ | ---- |
-| `PORT`   | `3000` | 服务监听端口 |
+| `PORT`   | `3000` | 服务监听端口（容器内固定 `EXPOSE 3000`；如需改宿主端口，编辑 `docker-compose.yml` 的端口映射，如 `"8080:3000"`，容器侧 `PORT` 无需改动） |
 
 ## 访问
 
@@ -55,7 +68,7 @@ http://localhost:3000
 | 方法 & 路径 | 说明 |
 | ----------- | ---- |
 | `POST /api/compute` | 单规格计算。请求体：`{circumference, seamWidth, zones:[{start,end}], detents?}`（单位 mm） |
-| `POST /api/compute-multi` | 多规格共用角度。请求体：`{circumferences:[…2～8 个周长…], seamWidth, zones, detents?}`；返回每个规格的完整单规格结果（`specs[].result`）、圆周交集 `common`（角度弧段）、默认角度 `best.deg` 及各规格间隙 `best.gaps`；无共同解时 `noSolution=true` 并给出 `blocker`（首次归零的规格序号、此前公共段 `priorCommon`、该规格禁用段 `blockingForbidden` 与冲突区间 `conflictSegments`） |
+| `POST /api/compute-multi` | 多规格共用角度。请求体：`{circumferences:[…2～8 个周长…], seamWidth, zones, detents?}`；返回每个规格的完整单规格结果（`specs[].result`）、圆周交集 `common`（角度弧段）、默认角度 `best.deg` 及各规格间隙 `best.gaps`；无共同解时 `noSolution=true` 并给出 `blocker`（首次归零的规格序号、此前公共段 `priorCommon`、该规格禁用段 `blockingForbidden` 与冲突区间 `conflictSegments`）与最小违约备选 `fallback`（见下） |
 | `GET /api/health` | 健康检查 |
 
 `detents`（可选）为设备档位约束：`{enabled:true, steps:2～360 的整数, offsetDeg?:数值角度}`；缺省或 `enabled:false` 时行为不变（返回 `detents:{enabled:false}`）。启用后返回：
@@ -64,6 +77,22 @@ http://localhost:3000
 - `detents.available`：全部可用档位。单规格每项 `{index, deg, mm, gapDeg}`；多规格每项 `{index, deg, minGapDeg, gaps:[各规格间隙]}`；
 - 单规格 `best` 取最优可用档位（附 `detentIndex`）；多规格 `best` 同理；
 - 连续区间有解但无可用档位时 `best=null`、`detents.noAvailable=true`，`detents.nearest[]` 按可行/共用弧给出 `{before, after}`（最近前、后档位及角距离）；保护区覆盖整圈时 `noSolution=true`、`noAvailable=false`。
+
+### 最小违约备选 `fallback`（仅 `POST /api/compute-multi`）
+
+公共可行段为空（`noSolution=true`）时返回；有共同安全段时为 `null`。字段：
+
+| 字段 | 说明 |
+| ---- | ---- |
+| `deg` | 备选角度（°）：使各规格**最大侵入深度最小**，并列比**总侵入深度**，再并列取**较小角度** |
+| `maxIntrusionDeg` | 该角度下各规格侵入深度的最大值（°），为 0 表示存在不侵入任何规格禁用区的角度（公共段仅在零宽边界点相接） |
+| `totalIntrusionDeg` | 各规格侵入深度之和（°），最大深度并列时的比较依据 |
+| `intrusions[]` | 逐规格明细 `{index, circumference, intrusionDeg, mm}`；`intrusionDeg=0` 表示该规格在此角度安全，整圈禁用的规格恒为 180° |
+| `detentIndex` | 启用档位约束时备选角度对应的档位序号（0 起）；未启用为 `null` |
+| `positions` | 启用档位约束时参与求解的全部档位角度；未启用为 `null`（求解域仅限档位角度） |
+| `reason` | 无解原因说明文本（含首次归零规格、是否整圈禁用、求解域是否限定在档位） |
+
+侵入深度定义：角度 θ 落在某规格禁用弧内时，沿圆周走到该弧最近出口的角距离；落在安全处为 0。
 
 ## 本地开发（可选）
 

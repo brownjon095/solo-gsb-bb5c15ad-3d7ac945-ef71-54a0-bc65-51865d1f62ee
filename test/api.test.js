@@ -142,3 +142,42 @@ test('多规格：连续公共段有解但无可用档位时 noAvailable=true �
   assert.equal(r.json.detents.noAvailable, true);
   assert.equal(r.json.detents.nearest.length, 1);
 });
+
+test('多规格：无共同解时返回最小违约备选 fallback（关闭/启用档位）', async () => {
+  const body = {
+    circumferences: [360, 180],
+    seamWidth: 0,
+    zones: [
+      { start: 90, end: 180 },
+      { start: 180, end: 360 },
+    ],
+  };
+  const r = await postJson('/api/compute-multi', body);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.noSolution, true);
+  assert.equal(r.json.best, null);
+  assert.ok(r.json.fallback);
+  assert.equal(typeof r.json.fallback.deg, 'number');
+  assert.equal(typeof r.json.fallback.maxIntrusionDeg, 'number');
+  assert.equal(typeof r.json.fallback.totalIntrusionDeg, 'number');
+  assert.equal(r.json.fallback.intrusions.length, 2);
+  assert.equal(typeof r.json.fallback.reason, 'string');
+  assert.equal(r.json.fallback.detentIndex, null);
+  assert.equal(r.json.fallback.positions, null);
+  // 有共同解时不返回 fallback
+  const ok = await postJson('/api/compute-multi', baseMulti);
+  assert.equal(ok.json.fallback, null);
+
+  const rd = await postJson('/api/compute-multi', {
+    ...body,
+    detents: { enabled: true, steps: 8, offsetDeg: 0 },
+  });
+  assert.equal(rd.status, 200);
+  assert.equal(rd.json.noSolution, true);
+  assert.ok(Number.isInteger(rd.json.fallback.detentIndex));
+  // 备选角度必须在档位集合中
+  assert.ok(
+    rd.json.detents.positions.some((d) => Math.abs(d - rd.json.fallback.deg) < 1e-9)
+  );
+  assert.match(rd.json.fallback.reason, /档位/);
+});

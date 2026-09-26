@@ -312,10 +312,37 @@ button.small { padding: 3px 10px; font-size: 12px; }
   display: inline-block;
 }
 .multi-legend .lg-swatch.common { background: #1e9e50; }
+.multi-legend .lg-swatch.fallback {
+  background: #d97706;
+  transform: rotate(45deg);
+  width: 10px;
+  height: 10px;
+}
 .multi-legend .lg-swatch.conflict {
   background: repeating-linear-gradient(45deg, #d43a3a 0 4px, #fff 4px 8px);
   border: 1px solid #d43a3a;
 }
+
+/* 最小违约备选 */
+.fallback-box {
+  margin-top: 10px;
+  padding: 9px 11px;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  color: #78350f;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.fallback-box .fb-title { font-weight: 700; color: #92400e; }
+.fallback-box .fb-reason { margin-top: 4px; color: #a16207; font-size: 12px; }
+.fallback-box .fb-angle { margin-top: 6px; }
+.fallback-box .fb-angle .num { font-size: 17px; font-weight: 700; color: #b45309; }
+.fallback-box .fb-per { margin-top: 6px; border-top: 1px dashed #fcd34d; }
+.fallback-box .fb-item { padding: 3px 0; border-top: 1px dashed #fde68a; }
+.fallback-box .fb-item:first-child { border-top: none; }
+.fallback-box .fb-item.ok { color: #15803d; }
+.fallback-box .fb-zero { color: #15803d; }
 
 /* ---------------- 方案快照 ---------------- */
 
